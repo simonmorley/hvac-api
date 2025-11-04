@@ -13,6 +13,7 @@ from app.devices.tado_client import TadoClient
 from app.devices.melcloud_client import MELCloudClient
 from app.devices.weather_client import WeatherClient
 from app.utils.logging import get_logger
+from app.utils.auth import verify_api_key
 
 logger = get_logger(__name__)
 
@@ -87,7 +88,8 @@ async def test_weather(client: WeatherClient) -> bool:
 
 @router.get("/test-connections")
 async def test_connections_endpoint(
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
 ) -> Dict[str, Any]:
     """
     Test connectivity to all external APIs.
