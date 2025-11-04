@@ -6,6 +6,7 @@ Uses SQLAlchemy 2.0+ async style.
 import os
 from typing import AsyncGenerator
 
+from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     create_async_engine,
@@ -14,6 +15,9 @@ from sqlalchemy.ext.asyncio import (
 
 from app.models.database import Base
 
+
+# Load environment variables from .env file BEFORE reading DATABASE_URL
+load_dotenv()
 
 # Get database URL from environment
 DATABASE_URL = os.getenv(

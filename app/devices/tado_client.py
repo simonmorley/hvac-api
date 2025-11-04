@@ -477,7 +477,10 @@ class TadoClient(DeviceClient):
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{self.AUTH_URL}/device_authorize",
-                data={"client_id": self.CLIENT_ID}
+                data={
+                    "client_id": self.CLIENT_ID,
+                    "scope": "home.user offline_access"
+                }
             )
             response.raise_for_status()
             return response.json()
@@ -521,4 +524,6 @@ class TadoClient(DeviceClient):
                     raise Exception(f"OAuth flow {error}")
 
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+            logger.info(f"Tado OAuth poll response: {result}")
+            return result

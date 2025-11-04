@@ -7,11 +7,13 @@ import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from app.database import close_db, init_db
 from app.utils.logging import setup_logging, get_logger
-from app.routes import test_connections
+from app.routes import test_connections, tado_auth
 
 
 # Load environment variables
@@ -54,8 +56,35 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Custom exception handler for validation errors
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    Convert Pydantic validation errors to clean, user-friendly messages.
+    Prevents exposing internal validation details, URLs, and type information.
+    """
+    errors = exc.errors()
+
+    # Extract simple error messages
+    error_messages = []
+    for error in errors:
+        loc = error.get("loc", [])
+        field = " -> ".join(str(l) for l in loc if l != "body")
+        msg = error.get("msg", "Invalid value")
+        error_messages.append(f"{field}: {msg}")
+
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={
+            "error": "Validation failed",
+            "details": error_messages
+        }
+    )
+
+
 # Include routers
 app.include_router(test_connections.router, tags=["Testing"])
+app.include_router(tado_auth.router, tags=["Authentication"])
 
 
 @app.get("/healthz")
