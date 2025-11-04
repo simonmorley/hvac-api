@@ -11,6 +11,7 @@ from fastapi import FastAPI
 
 from app.database import close_db, init_db
 from app.utils.logging import setup_logging, get_logger
+from app.routes import test_connections
 
 
 # Load environment variables
@@ -52,6 +53,9 @@ app = FastAPI(
     description="Smart HVAC control for Tado radiators and MELCloud AC units",
     lifespan=lifespan
 )
+
+# Include routers
+app.include_router(test_connections.router, tags=["Testing"])
 
 
 @app.get("/healthz")
