@@ -1,0 +1,144 @@
+{
+  "exclude": {
+    "tado": [
+      "Hot Water"
+    ],
+    "mel": []
+  },
+  "ac_defaults": {
+    "mode": "heat",
+    "fan": "auto",
+    "vaneH": "auto",
+    "vaneV": "auto",
+    "vanes": true
+  },
+  "names": {
+    "mel_downstairs": [],
+    "mel_master": "",
+    "mel_kids": "",
+    "tado_office": "Office",
+    "tado_spare": "Spare Room",
+    "tado_master": "Master Bedroom",
+    "tado_kids": "Kids Bedroom"
+  },
+  "targets": {
+    "spare": 17,
+    "hall": 17,
+    "loo": 17
+  },
+  "pv": {
+    "boost_threshold_w": 600,
+    "boost_delta_c": 0.5
+  },
+  "blackout_windows": [
+    {
+      "name": "Tado Morning Blackout",
+      "start": "08:00",
+      "end": "09:00",
+      "applies_to": [
+        "tado"
+      ],
+      "enabled": true
+    }
+  ],
+  "rooms": {
+    "Master": {
+      "tado": "Main Bed",
+      "mel": "Master bedroom",
+      "ac": {
+        "fan": 3,
+        "vanes": false
+      },
+      "floor": "upstairs",
+      "schedule": {
+        "type": "three-period",
+        "day": 17,
+        "eve": 19,
+        "night": 16,
+        "day_start": "07:00",
+        "eve_start": "18:00",
+        "eve_end": "22:00"
+      }
+    },
+    "Kids": {
+      "tado": "Doug",
+      "mel": "Douglas's bedroom",
+      "ac": {
+        "vanes": false
+      },
+      "floor": "upstairs",
+      "schedule": {
+        "type": "three-period",
+        "day": 18,
+        "eve": 18,
+        "night": 16,
+        "day_start": "07:00",
+        "eve_start": "18:00",
+        "eve_end": "19:00"
+      }
+    },
+    "Downstairs": {
+      "mel_multi": [
+        "Living"
+      ],
+      "ac": {
+        "fan": 4
+      },
+      "floor": "downstairs",
+      "schedule": {
+        "type": "four-period",
+        "night": 16,
+        "night_ac": {
+          "fan": "auto"
+        },
+        "morning": 21,
+        "morning_ac": {
+          "fan": 4
+        },
+        "day": 18,
+        "day_ac": {
+          "fan": "auto"
+        },
+        "evening": 19,
+        "evening_ac": {
+          "fan": 4
+        },
+        "morning_start": "07:00",
+        "morning_end": "08:00",
+        "evening_start": "17:30",
+        "evening_end": "22:00"
+      }
+    },
+    "Office": {
+      "tado": "Office",
+      "floor": "upstairs",
+      "schedule": {
+        "type": "workday",
+        "work": 20,
+        "idle": 17,
+        "start": "08:00",
+        "end": "20:00"
+      }
+    },
+    "Spare": {
+      "tado": "Spare Room",
+      "floor": "upstairs"
+    },
+    "Hall": {
+      "tado": "Hall",
+      "floor": "upstairs"
+    },
+    "Loo": {
+      "tado": "Loo",
+      "floor": "downstairs"
+    }
+  },
+  "weather": {
+    "lat": 51.4184637,
+    "lon": 0.0135339,
+    "provider": "open-meteo"
+  },
+  "thresholds": {
+    "ac_min_outdoor_c": 2
+  }
+}
