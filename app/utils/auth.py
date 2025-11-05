@@ -41,3 +41,7 @@ def verify_api_key(x_api_key: Optional[str] = Header(None)) -> str:
         )
 
     return x_api_key
+
+
+# Alias for consistency with route usage
+validate_api_key = verify_api_key

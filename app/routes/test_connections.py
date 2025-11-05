@@ -2,13 +2,12 @@
 Test connections endpoint for verifying external API connectivity.
 """
 
-import os
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.dependencies import get_device_clients, get_config_manager
+from app.config import ConfigManager
 from app.devices.tado_client import TadoClient
 from app.devices.melcloud_client import MELCloudClient
 from app.devices.weather_client import WeatherClient
@@ -18,11 +17,6 @@ from app.utils.auth import verify_api_key
 logger = get_logger(__name__)
 
 router = APIRouter()
-
-
-def get_sim_mode() -> bool:
-    """Get SIM_MODE from environment."""
-    return os.getenv("SIM_MODE", "false").lower() == "true"
 
 
 async def test_tado(client: TadoClient) -> bool:
@@ -88,7 +82,8 @@ async def test_weather(client: WeatherClient) -> bool:
 
 @router.get("/test-connections")
 async def test_connections_endpoint(
-    db: AsyncSession = Depends(get_db),
+    clients: Tuple[TadoClient, MELCloudClient] = Depends(get_device_clients),
+    config_mgr: ConfigManager = Depends(get_config_manager),
     api_key: str = Depends(verify_api_key)
 ) -> Dict[str, Any]:
     """
@@ -113,27 +108,20 @@ async def test_connections_endpoint(
             }
         }
     """
-    sim_mode = get_sim_mode()
+    # Unpack device clients
+    tado_client, melcloud_client = clients
+
+    # Get sim mode from clients
+    sim_mode = tado_client.sim_mode
 
     logger.info("Testing external API connections", extra={"sim_mode": sim_mode})
 
-    # Create clients
-    tado_client = TadoClient(
-        home_id=os.getenv("TADO_HOME_ID", ""),
-        db_session=db,
-        sim_mode=sim_mode
-    )
-
-    melcloud_client = MELCloudClient(
-        email=os.getenv("MELCLOUD_EMAIL", ""),
-        password=os.getenv("MELCLOUD_PASSWORD", ""),
-        db_session=db,
-        sim_mode=sim_mode
-    )
+    # Load config for weather client
+    config = await config_mgr.load_config()
 
     weather_client = WeatherClient(
-        latitude=float(os.getenv("WEATHER_LAT", "51.4184637")),
-        longitude=float(os.getenv("WEATHER_LON", "0.0135339")),
+        latitude=config.weather.lat,
+        longitude=config.weather.lon,
         sim_mode=sim_mode
     )
 

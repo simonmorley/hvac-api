@@ -73,3 +73,24 @@ class StateManager:
             delete(SystemState).where(SystemState.key == key)
         )
         await self.db.commit()
+
+    async def get_policy_enabled(self) -> bool:
+        """
+        Check if policy engine is enabled.
+
+        Returns:
+            True if enabled (default), False if disabled
+        """
+        value = await self.get("policy_enabled")
+        if value is None:
+            return True  # Default to enabled
+        return value.lower() == "true"
+
+    async def set_policy_enabled(self, enabled: bool) -> None:
+        """
+        Enable or disable policy engine.
+
+        Args:
+            enabled: True to enable, False to disable
+        """
+        await self.set("policy_enabled", "true" if enabled else "false")

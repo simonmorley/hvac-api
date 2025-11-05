@@ -7,14 +7,16 @@ Uses database locking to prevent concurrent refresh attempts.
 
 import asyncio
 import httpx
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, text
+from sqlalchemy import select, text, delete
 
 from app.devices.base import DeviceClient
+from app.models.database import ApiCache
 from app.utils.secrets import SecretsManager
 from app.utils.logging import get_logger
+from app.utils.text_utils import sanitize_device_name as sanitize_zone_name
 
 logger = get_logger(__name__)
 
@@ -68,12 +70,76 @@ class TadoClient(DeviceClient):
         self.db = db_session
         self.secrets = SecretsManager(db_session)
 
-        # In-memory caches
+        # In-memory L1 cache (fast path, short TTL)
+        # Falls back to PostgreSQL L2 cache (persistent, survives restarts)
         self._access_token_cache: Optional[str] = None
         self._access_token_expires_at: Optional[datetime] = None
-        self._zone_list_cache: Optional[List[Dict[str, Any]]] = None
-        self._zone_list_expires_at: Optional[datetime] = None
-        self._zone_state_cache: Dict[int, tuple[Dict[str, Any], datetime]] = {}
+
+    async def _get_cache(self, key: str) -> Optional[Dict[str, Any]]:
+        """
+        Get value from PostgreSQL cache if not expired.
+
+        Args:
+            key: Cache key
+
+        Returns:
+            Cached value dict or None if expired/missing
+        """
+        result = await self.db.execute(
+            select(ApiCache).where(ApiCache.key == key)
+        )
+        cache_entry = result.scalar_one_or_none()
+
+        if not cache_entry:
+            return None
+
+        # Check if expired
+        now = datetime.now(timezone.utc)
+        if now >= cache_entry.expires_at:
+            # Expired - delete and return None
+            await self.db.execute(
+                delete(ApiCache).where(ApiCache.key == key)
+            )
+            await self.db.commit()
+            return None
+
+        return cache_entry.value
+
+    async def _set_cache(
+        self,
+        key: str,
+        value: Dict[str, Any],
+        ttl: timedelta
+    ) -> None:
+        """
+        Store value in PostgreSQL cache with TTL.
+
+        Args:
+            key: Cache key
+            value: Value to cache (must be JSON-serializable)
+            ttl: Time to live
+        """
+        now = datetime.now(timezone.utc)
+        expires_at = now + ttl
+
+        # Upsert cache entry
+        result = await self.db.execute(
+            select(ApiCache).where(ApiCache.key == key)
+        )
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            existing.value = value
+            existing.expires_at = expires_at
+        else:
+            cache_entry = ApiCache(
+                key=key,
+                value=value,
+                expires_at=expires_at
+            )
+            self.db.add(cache_entry)
+
+        await self.db.commit()
 
     async def get_access_token(self) -> str:
         """
@@ -89,7 +155,7 @@ class TadoClient(DeviceClient):
             Exception: If no refresh token or refresh fails
         """
         # Check cache
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         cache_valid = (
             self._access_token_cache
             and self._access_token_expires_at
@@ -99,56 +165,55 @@ class TadoClient(DeviceClient):
             return self._access_token_cache
 
         # Need to refresh - acquire database lock
-        async with self.db.begin():
-            # Use SELECT FOR UPDATE to lock the refresh token row
-            await self.db.execute(
-                text("SELECT pg_advisory_lock(hashtext('tado_token_refresh'))")
-            )
+        # Use advisory lock to prevent concurrent token refresh
+        await self.db.execute(
+            text("SELECT pg_advisory_lock(hashtext('tado_token_refresh'))")
+        )
 
-            try:
-                # Get refresh token from database
-                refresh_token = await self.secrets.get("tado_refresh_token")
-                if not refresh_token:
-                    raise Exception("No Tado refresh token found. Run OAuth flow first.")
+        try:
+            # Get refresh token from database
+            refresh_token = await self.secrets.get("tado_refresh_token")
+            if not refresh_token:
+                raise Exception("No Tado refresh token found. Run OAuth flow first.")
 
-                if self.sim_mode:
-                    logger.info("[SIM] Refreshing Tado access token")
-                    self._access_token_cache = "sim_access_token"
-                    self._access_token_expires_at = now + self.ACCESS_TOKEN_TTL
-                    return self._access_token_cache
-
-                # Refresh the token
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    response = await client.post(
-                        f"{self.AUTH_URL}/token",
-                        data={
-                            "client_id": self.CLIENT_ID,
-                            "grant_type": "refresh_token",
-                            "refresh_token": refresh_token
-                        }
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-
-                # Extract tokens
-                new_access_token = data["access_token"]
-                new_refresh_token = data["refresh_token"]
-
-                # CRITICAL: Store new refresh token immediately (old one is now invalid)
-                await self.secrets.set("tado_refresh_token", new_refresh_token)
-
-                # Cache access token
-                self._access_token_cache = new_access_token
+            if self.sim_mode:
+                logger.info("[SIM] Refreshing Tado access token")
+                self._access_token_cache = "sim_access_token"
                 self._access_token_expires_at = now + self.ACCESS_TOKEN_TTL
+                return self._access_token_cache
 
-                logger.info("Tado access token refreshed successfully")
-                return new_access_token
-
-            finally:
-                # Release database lock
-                await self.db.execute(
-                    text("SELECT pg_advisory_unlock(hashtext('tado_token_refresh'))")
+            # Refresh the token
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{self.AUTH_URL}/token",
+                    data={
+                        "client_id": self.CLIENT_ID,
+                        "grant_type": "refresh_token",
+                        "refresh_token": refresh_token
+                    }
                 )
+                response.raise_for_status()
+                data = response.json()
+
+            # Extract tokens
+            new_access_token = data["access_token"]
+            new_refresh_token = data["refresh_token"]
+
+            # CRITICAL: Store new refresh token immediately (old one is now invalid)
+            await self.secrets.set("tado_refresh_token", new_refresh_token)
+
+            # Cache access token
+            self._access_token_cache = new_access_token
+            self._access_token_expires_at = now + self.ACCESS_TOKEN_TTL
+
+            logger.info("Tado access token refreshed successfully")
+            return new_access_token
+
+        finally:
+            # Release database lock
+            await self.db.execute(
+                text("SELECT pg_advisory_unlock(hashtext('tado_token_refresh'))")
+            )
 
     async def _make_request(
         self,
@@ -215,38 +280,44 @@ class TadoClient(DeviceClient):
     async def list_zones(self) -> List[str]:
         """
         List all available zone names.
-        Cached for 1 hour.
+        Cached for 1 hour in PostgreSQL to prevent rate limiting.
+
+        Rate limit protection:
+        - Zone list rarely changes
+        - Cache for 1 hour in database
+        - Survives restarts and shared across instances
 
         Returns:
             List of zone names
         """
         if self.sim_mode:
             logger.info("[SIM] Listing Tado zones")
-            return ["Master Bedroom", "Living Room", "Kitchen"]
+            return []
 
-        # Check cache
-        now = datetime.now()
-        cache_valid = (
-            self._zone_list_cache
-            and self._zone_list_expires_at
-            and now < self._zone_list_expires_at
-        )
-        if cache_valid:
-            return [z["name"] for z in self._zone_list_cache]
+        # Check PostgreSQL cache
+        cache_key = f"tado:zones:{self.home_id}"
+        cached = await self._get_cache(cache_key)
+        if cached and "zones" in cached:
+            logger.debug("Tado zones cache HIT (PostgreSQL)")
+            return [sanitize_zone_name(z["name"]) for z in cached["zones"]]
 
-        # Fetch from API
+        # Cache MISS - fetch from API
+        logger.info("Tado zones cache MISS - fetching from API")
         response = await self._make_request("GET", f"/homes/{self.home_id}/zones")
         zones = response.json()
 
-        # Cache result
-        self._zone_list_cache = zones
-        self._zone_list_expires_at = now + self.ZONE_LIST_TTL
+        # Store in PostgreSQL cache
+        await self._set_cache(
+            cache_key,
+            {"zones": zones},
+            self.ZONE_LIST_TTL
+        )
 
-        return [z["name"] for z in zones]
+        return [sanitize_zone_name(z["name"]) for z in zones]
 
     async def _get_zone_id(self, zone_name: str) -> int:
         """
-        Get zone ID from zone name.
+        Get zone ID from zone name (uses cached zone list).
 
         Args:
             zone_name: Zone name
@@ -261,9 +332,23 @@ class TadoClient(DeviceClient):
             # Fake zone IDs in sim mode
             return hash(zone_name) % 1000
 
-        # Get zone list (uses cache)
-        response = await self._make_request("GET", f"/homes/{self.home_id}/zones")
-        zones = response.json()
+        # Get zone list from PostgreSQL cache
+        cache_key = f"tado:zones:{self.home_id}"
+        cached = await self._get_cache(cache_key)
+
+        if not cached or "zones" not in cached:
+            # Cache miss - fetch from API
+            response = await self._make_request("GET", f"/homes/{self.home_id}/zones")
+            zones = response.json()
+
+            # Store in cache
+            await self._set_cache(
+                cache_key,
+                {"zones": zones},
+                self.ZONE_LIST_TTL
+            )
+        else:
+            zones = cached["zones"]
 
         for zone in zones:
             if zone["name"] == zone_name:
@@ -273,7 +358,12 @@ class TadoClient(DeviceClient):
 
     async def _get_zone_state(self, zone_id: int) -> Dict[str, Any]:
         """
-        Get zone state (cached for 2 minutes).
+        Get zone state (cached for 2 minutes in PostgreSQL).
+
+        Rate limit protection:
+        - Zone states change frequently (temperature, power)
+        - Cache for 2 minutes - tolerate slight staleness
+        - Database cache survives restarts
 
         Args:
             zone_id: Zone ID
@@ -292,25 +382,27 @@ class TadoClient(DeviceClient):
                 "overlay": None
             }
 
-        # Check cache
-        now = datetime.now()
-        if zone_id in self._zone_state_cache:
-            state, expires_at = self._zone_state_cache[zone_id]
-            if now >= expires_at:
-                # Cache expired - continue to API fetch
-                pass
-            else:
-                return state
+        # Check PostgreSQL cache
+        cache_key = f"tado:zone_state:{self.home_id}:{zone_id}"
+        cached = await self._get_cache(cache_key)
+        if cached and "state" in cached:
+            logger.debug(f"Tado zone {zone_id} state cache HIT (PostgreSQL)")
+            return cached["state"]
 
-        # Fetch from API
+        # Cache MISS - fetch from API
+        logger.debug(f"Tado zone {zone_id} state cache MISS - fetching from API")
         response = await self._make_request(
             "GET",
             f"/homes/{self.home_id}/zones/{zone_id}/state"
         )
         state = response.json()
 
-        # Cache result
-        self._zone_state_cache[zone_id] = (state, now + self.ZONE_STATE_TTL)
+        # Store in PostgreSQL cache
+        await self._set_cache(
+            cache_key,
+            {"state": state},
+            self.ZONE_STATE_TTL
+        )
 
         return state
 
@@ -453,6 +545,50 @@ class TadoClient(DeviceClient):
         except Exception as e:
             logger.error(f"Failed to get heating power for Tado zone {zone_name}: {e}")
             return None
+
+    async def get_zone_state(self, zone_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Get full zone state (temperature, heating, overlay, etc).
+
+        Cached for 2 minutes in PostgreSQL to prevent rate limiting.
+        This is more efficient than calling get_temperature() and get_heating_percent()
+        separately since it only does one zone lookup and one state fetch.
+
+        Args:
+            zone_name: Zone name
+
+        Returns:
+            Zone state dict with parsed temperature and heating data, or None on failure
+
+        Example return value:
+            {
+                "temperature": 20.5,
+                "heating_percent": 35,
+                "overlay": {...},
+                "raw_state": {...}
+            }
+        """
+        if self.sim_mode:
+            return {
+                "temperature": 19.5,
+                "heating_percent": 0,
+                "overlay": None,
+                "raw_state": {}
+            }
+
+        zone_id = await self._get_zone_id(zone_name)
+        state = await self._get_zone_state(zone_id)
+
+        # Parse out commonly needed values
+        temp = state.get("sensorDataPoints", {}).get("insideTemperature", {}).get("celsius")
+        power = state.get("activityDataPoints", {}).get("heatingPower", {}).get("percentage")
+
+        return {
+            "temperature": temp,
+            "heating_percent": power if power is not None else 0,
+            "overlay": state.get("overlay"),
+            "raw_state": state
+        }
 
     # OAuth Device Code Flow Methods
 

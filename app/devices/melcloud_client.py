@@ -12,6 +12,7 @@ import httpx
 from app.devices.base import DeviceClient
 from app.utils.secrets import SecretsManager
 from app.utils.logging import get_logger
+from app.utils.text_utils import sanitize_device_name
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = get_logger(__name__)
@@ -39,6 +40,11 @@ class MELCloudClient(DeviceClient):
     FLAG_FAN_SPEED = 0x08
     FLAG_VANE_VERTICAL = 0x10
     FLAG_VANE_HORIZONTAL = 0x100
+
+    # Vane position constants
+    VANE_AUTO = 0
+    VANE_HORIZONTAL_SWING = 12
+    VANE_VERTICAL_SWING = 7
 
     # Cache TTLs
     DEVICE_LIST_TTL = timedelta(hours=1)
@@ -156,6 +162,51 @@ class MELCloudClient(DeviceClient):
             response.raise_for_status()
             return response
 
+    def _traverse_device_hierarchy(
+        self,
+        node: Dict[str, Any],
+        building_id: int,
+        devices: List[Dict[str, Any]]
+    ) -> None:
+        """
+        Recursively traverse nested device hierarchy node.
+
+        Mutates the devices list in-place by appending discovered devices.
+
+        Args:
+            node: Current hierarchy node (Area, Floor, or Structure)
+            building_id: Building ID for this hierarchy
+            devices: List to append devices to
+        """
+        # Add direct devices at this level
+        for device in node.get("Devices", []):
+            # MELCloud uses "Type" field, not "DeviceType"
+            device_type = device.get("Type")
+            raw_name = device.get("DeviceName", "")
+            sanitized_name = sanitize_device_name(raw_name)
+
+            # Log name sanitization (important to know about unicode issues)
+            if raw_name != sanitized_name:
+                logger.info(f"Sanitized device name: {raw_name} -> {sanitized_name}")
+
+            # Only support Air-to-Air (type 0)
+            if device_type == 0:
+                devices.append({
+                    "id": device["DeviceID"],
+                    "building_id": building_id,
+                    "name": sanitized_name,
+                    "type": device_type
+                })
+                logger.debug(f"Added MELCloud device: {sanitized_name}")
+            else:
+                logger.debug(f"Skipping MELCloud device: {sanitized_name} (Type={device_type})")
+
+        # Recurse into nested structures
+        for area in node.get("Areas", []):
+            self._traverse_device_hierarchy(area, building_id, devices)
+        for floor in node.get("Floors", []):
+            self._traverse_device_hierarchy(floor, building_id, devices)
+
     def _collect_devices(self, structure: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Recursively traverse nested device hierarchy and collect all devices.
@@ -169,40 +220,42 @@ class MELCloudClient(DeviceClient):
             List of flattened device dicts with {id, building_id, name, type}
         """
         devices = []
+        inner_structure = structure.get("Structure", {})
 
-        def traverse(node: Dict[str, Any], building_id: int):
-            # Add direct devices
-            for device in node.get("Devices", []):
-                # Only support Air-to-Air (type 0)
-                if device.get("DeviceType") == 0:
-                    devices.append({
-                        "id": device["DeviceID"],
-                        "building_id": building_id,
-                        "name": device["DeviceName"],
-                        "type": device["DeviceType"]
-                    })
+        # Structure discovery (reduced verbosity)
+        devices_list = inner_structure.get("Devices", [])
+        areas_list = inner_structure.get("Areas", [])
+        floors_list = inner_structure.get("Floors", [])
 
-            # Recurse into nested structures
-            for area in node.get("Areas", []):
-                traverse(area, building_id)
-            for floor in node.get("Floors", []):
-                traverse(floor, building_id)
+        logger.debug(
+            f"Structure breakdown: "
+            f"Devices={len(devices_list)}, Areas={len(areas_list)}, Floors={len(floors_list)}"
+        )
 
-        # Top-level structure
+        # Process top-level devices
         for building in structure.get("Structure", {}).get("Devices", []):
-            if building.get("DeviceType") == 0:
+            device_type = building.get("Type")
+            raw_name = building.get("DeviceName", "")
+            sanitized_name = sanitize_device_name(raw_name)
+
+            if raw_name != sanitized_name:
+                logger.info(f"Sanitized device name: {raw_name} -> {sanitized_name}")
+
+            if device_type == 0:
                 devices.append({
                     "id": building["DeviceID"],
                     "building_id": structure["ID"],
-                    "name": building["DeviceName"],
-                    "type": building["DeviceType"]
+                    "name": sanitized_name,
+                    "type": device_type
                 })
+                logger.debug(f"Added MELCloud device: {sanitized_name}")
 
+        # Traverse Areas and Floors recursively
         for building in structure.get("Structure", {}).get("Areas", []):
-            traverse(building, structure["ID"])
+            self._traverse_device_hierarchy(building, structure["ID"], devices)
 
         for building in structure.get("Structure", {}).get("Floors", []):
-            traverse(building, structure["ID"])
+            self._traverse_device_hierarchy(building, structure["ID"], devices)
 
         return devices
 
@@ -216,7 +269,7 @@ class MELCloudClient(DeviceClient):
         """
         if self.sim_mode:
             logger.info("[SIM] Listing MELCloud devices")
-            return ["Living", "Master bedroom", "Downstairs"]
+            return []
 
         # Check cache
         now = datetime.now()
@@ -232,10 +285,18 @@ class MELCloudClient(DeviceClient):
         response = await self._make_request("GET", "/User/ListDevices")
         data = response.json()
 
+        logger.debug(f"MELCloud API returned {len(data)} structures")
+
         # Flatten nested structure
         all_devices = []
-        for structure in data:
-            all_devices.extend(self._collect_devices(structure))
+        for i, structure in enumerate(data):
+            devices = self._collect_devices(structure)
+            logger.debug(
+                f"Structure {i}: {structure.get('Name')} - {len(devices)} devices"
+            )
+            all_devices.extend(devices)
+
+        logger.info(f"MELCloud: Found {len(all_devices)} devices")
 
         # Cache result
         self._device_list_cache = all_devices
@@ -398,8 +459,8 @@ class MELCloudClient(DeviceClient):
                 "SetTemperature": setpoint,
                 "OperationMode": self._mode_to_int(mode),
                 "SetFanSpeed": self._fan_to_int(fan),
-                "VaneHorizontal": kwargs.get("vaneH", 12 if vanes else 0),  # 12=swing, 0=auto
-                "VaneVertical": kwargs.get("vaneV", 7 if vanes else 0),  # 7=swing, 0=auto
+                "VaneHorizontal": kwargs.get("vaneH", self.VANE_HORIZONTAL_SWING if vanes else self.VANE_AUTO),
+                "VaneVertical": kwargs.get("vaneV", self.VANE_VERTICAL_SWING if vanes else self.VANE_AUTO),
                 "HasPendingCommand": True
             }
 

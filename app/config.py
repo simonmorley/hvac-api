@@ -7,7 +7,8 @@ import json
 import os
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.config import HVACConfig
@@ -64,7 +65,7 @@ class ConfigManager:
 
     async def save_config(self, config: HVACConfig) -> bool:
         """
-        Save configuration to database.
+        Save configuration to database using efficient UPSERT.
 
         Args:
             config: Validated HVACConfig instance
@@ -78,23 +79,16 @@ class ConfigManager:
         # Serialize to JSON
         config_json = config.model_dump_json(indent=2)
 
-        # Check if config exists
-        result = await self.db.execute(
-            select(ConfigStore).where(ConfigStore.id == 1)
+        # Use PostgreSQL native UPSERT (INSERT ... ON CONFLICT ... DO UPDATE)
+        stmt = pg_insert(ConfigStore).values(
+            id=1,
+            config_json=config_json
+        ).on_conflict_do_update(
+            index_elements=['id'],
+            set_={'config_json': config_json}
         )
-        existing = result.scalar_one_or_none()
 
-        if existing:
-            # Update existing config
-            existing.config_json = config_json
-        else:
-            # Insert new config
-            new_config = ConfigStore(
-                id=1,
-                config_json=config_json
-            )
-            self.db.add(new_config)
-
+        await self.db.execute(stmt)
         await self.db.commit()
         return True
 

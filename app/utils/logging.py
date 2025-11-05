@@ -27,7 +27,7 @@ def setup_logging():
         log.warning("device_timeout", device="Master bedroom", timeout_ms=5000)
         log.error("api_call_failed", api="tado", error="401 Unauthorized")
     """
-    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_level = os.getenv("LOG_LEVEL", "WARNING").upper()  # Default to WARNING to reduce noise
 
     # Configure standard library logging
     logging.basicConfig(
