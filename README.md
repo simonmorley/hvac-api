@@ -127,7 +127,7 @@ Run Alembic migrations:
 alembic upgrade head
 ```
 
-This creates 7 tables:
+This creates 12 tables:
 - `secrets` - API tokens and credentials
 - `system_state` - Policy engine state
 - `device_commands` - Command history
@@ -135,6 +135,11 @@ This creates 7 tables:
 - `device_cooldowns` - Compressor protection timers
 - `config_store` - Active configuration JSON
 - `logs` - Structured logging
+- `rooms` - Room configuration with device mappings
+- `groups` - Room groupings (e.g., Upstairs, Downstairs)
+- `room_groups` - Many-to-many room-group relationships
+- `system_settings` - Global AC defaults, PV config, weather config
+- `api_cache` - Cached API responses
 
 ### 6. Configuration File
 
@@ -263,6 +268,217 @@ alembic downgrade -1
 ```bash
 alembic current
 alembic history
+```
+
+## Room Groups
+
+The system supports grouping rooms for organization and bulk operations (e.g., "Upstairs", "Downstairs", "Bedrooms").
+
+### Overview
+
+**Database Tables:**
+- `groups` - Group definitions (id, name, description, timestamps)
+- `room_groups` - Many-to-many junction table (room_id, group_id)
+
+**Features:**
+- Many-to-many relationships: A room can belong to multiple groups
+- Cascade deletion: Deleting a group removes room associations but NOT rooms themselves
+- Unique group names
+- Timestamps for audit trail
+
+### API Endpoints
+
+All endpoints require `x-api-key` header authentication.
+
+#### List All Groups
+```bash
+GET /groups
+
+# Example
+curl -H "x-api-key: your-key" http://localhost:8000/groups
+
+# Response
+{
+  "groups": [
+    {
+      "id": 1,
+      "name": "Upstairs",
+      "description": "Upper floor rooms",
+      "room_count": 6,
+      "created_at": "2025-11-03T10:00:00Z",
+      "updated_at": "2025-11-03T10:00:00Z"
+    },
+    {
+      "id": 2,
+      "name": "Downstairs",
+      "description": "Ground floor rooms",
+      "room_count": 2,
+      "created_at": "2025-11-03T10:00:00Z",
+      "updated_at": "2025-11-03T10:00:00Z"
+    }
+  ]
+}
+```
+
+#### Get Group Details
+```bash
+GET /groups/{id}
+
+# Example
+curl -H "x-api-key: your-key" http://localhost:8000/groups/1
+
+# Response
+{
+  "id": 1,
+  "name": "Upstairs",
+  "description": "Upper floor rooms",
+  "created_at": "2025-11-03T10:00:00Z",
+  "updated_at": "2025-11-03T10:00:00Z",
+  "rooms": [
+    {
+      "id": 1,
+      "name": "Master",
+      "tado_zone": "Main Bed",
+      "mel_device": "Master bedroom"
+    },
+    {
+      "id": 2,
+      "name": "Kids",
+      "tado_zone": "Kids",
+      "mel_device": "Kids Bedroom"
+    }
+  ]
+}
+```
+
+#### Create Group
+```bash
+POST /groups
+
+# Example
+curl -X POST -H "x-api-key: your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Bedrooms", "description": "All bedroom zones"}' \
+  http://localhost:8000/groups
+
+# Response (201 Created)
+{
+  "ok": true,
+  "group": {
+    "id": 3,
+    "name": "Bedrooms",
+    "description": "All bedroom zones",
+    "created_at": "2025-11-03T11:00:00Z",
+    "updated_at": "2025-11-03T11:00:00Z"
+  }
+}
+```
+
+#### Update Group
+```bash
+PUT /groups/{id}
+
+# Example - Update name and description
+curl -X PUT -H "x-api-key: your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "All Bedrooms", "description": "Updated description"}' \
+  http://localhost:8000/groups/3
+
+# Example - Update only name
+curl -X PUT -H "x-api-key: your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Living Spaces"}' \
+  http://localhost:8000/groups/3
+
+# Response
+{
+  "ok": true,
+  "group": {
+    "id": 3,
+    "name": "All Bedrooms",
+    "description": "Updated description",
+    "created_at": "2025-11-03T11:00:00Z",
+    "updated_at": "2025-11-03T11:30:00Z"
+  }
+}
+```
+
+#### Delete Group
+```bash
+DELETE /groups/{id}
+
+# Example
+curl -X DELETE -H "x-api-key: your-key" \
+  http://localhost:8000/groups/3
+
+# Response
+{
+  "ok": true,
+  "message": "Group 'Bedrooms' deleted"
+}
+```
+
+#### Update Room Assignments
+```bash
+PUT /groups/{id}/rooms
+
+# Example - Assign rooms 1, 2, 3 to group
+curl -X PUT -H "x-api-key: your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"room_ids": [1, 2, 3]}' \
+  http://localhost:8000/groups/1/rooms
+
+# Example - Remove all rooms from group
+curl -X PUT -H "x-api-key: your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"room_ids": []}' \
+  http://localhost:8000/groups/1/rooms
+
+# Response
+{
+  "ok": true,
+  "message": "Updated 3 room(s) for group 'Upstairs'"
+}
+```
+
+### Usage Patterns
+
+**Organizational Grouping:**
+- "Upstairs" / "Downstairs" - By floor
+- "Bedrooms" / "Living Spaces" - By function
+- "North Wing" / "South Wing" - By location
+
+**Overlapping Groups:**
+Rooms can belong to multiple groups:
+```json
+"Master" bedroom could be in:
+  - "Upstairs" (location)
+  - "Bedrooms" (function)
+  - "Priority Zones" (importance)
+```
+
+**Getting Room IDs:**
+Use the `/inventory` endpoint to get room IDs for assignment:
+```bash
+curl -H "x-api-key: your-key" http://localhost:8000/inventory
+```
+
+### Error Handling
+
+**400 Bad Request:**
+- Empty group name
+- Duplicate group name
+- Invalid room IDs in assignment
+
+**404 Not Found:**
+- Group ID doesn't exist
+
+**Example Error Response:**
+```json
+{
+  "error": "Validation failed",
+  "details": ["name: Field required"]
+}
 ```
 
 ## Development Workflow

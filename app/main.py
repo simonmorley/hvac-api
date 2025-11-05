@@ -24,7 +24,8 @@ from app.routes import (
     config,
     inventory,
     control,
-    health
+    health,
+    groups
 )
 
 
@@ -114,6 +115,7 @@ app.include_router(config.router, tags=["Configuration"])
 app.include_router(inventory.router, tags=["Inventory"])
 app.include_router(control.router, tags=["Control"])
 app.include_router(health.router, tags=["Health"])
+app.include_router(groups.router, tags=["Groups"])
 
 
 @app.get("/healthz")
